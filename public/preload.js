@@ -11,4 +11,12 @@ contextBridge.exposeInMainWorld('electron', {
   getSlackTokens: () => ipcRenderer.invoke('get-slack-tokens'),
   setSlackTokens: (tokens) => ipcRenderer.invoke('set-slack-tokens', tokens),
   clearSlackTokens: () => ipcRenderer.invoke('clear-slack-tokens'),
+  
+  // Event listeners
+  onSlackOAuthCallback: (callback) => {
+    ipcRenderer.on('slack-oauth-callback', (_, data) => callback(data));
+  },
+  removeSlackOAuthListener: () => {
+    ipcRenderer.removeAllListeners('slack-oauth-callback');
+  }
 });

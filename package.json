@@ -11,7 +11,7 @@
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
-    "proxy": "nodemon server/server.js",
+    "proxy": "NODE_ENV=development nodemon server/server.js",
     "electron:dev": "concurrently \"npm start\" \"electron .\"",
     "electron:build": "npm run build && electron-builder build --publish never",
     "postinstall": "electron-builder install-app-deps"

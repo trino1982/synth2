@@ -10,13 +10,81 @@ function SlackCallback() {
   const location = useLocation();
   const { currentUser } = useAuth();
   
+  // Function to handle the OAuth code
+  const processOAuthCode = async (code, stateUserId) => {
+    try {
+      if (!code) {
+        setStatus('error');
+        setError('No authorization code received from Slack');
+        return;
+      }
+      
+      // Get the user ID either from the state parameter or current user
+      const userId = stateUserId || (currentUser ? currentUser.uid : null);
+      
+      if (!userId) {
+        setStatus('error');
+        setError('User ID not found. You must be logged in to connect Slack');
+        return;
+      }
+      
+      console.log('Processing OAuth code:', code, 'for user:', userId);
+      
+      // Exchange code for token
+      const tokenData = await exchangeCodeForToken(code, userId);
+      
+      // Store the token securely
+      if (window.electron) {
+        console.log('Storing Slack tokens in Electron', {
+          accessToken: tokenData.access_token ? 'present' : 'missing',
+          teamId: tokenData.team?.id || 'missing',
+          userId: userId || 'missing'
+        });
+        
+        try {
+          await window.electron.setSlackTokens({
+            accessToken: tokenData.access_token,
+            teamId: tokenData.team.id,
+            userId: userId // Store the user ID with the tokens
+          });
+          
+          // Verify the tokens were stored
+          const storedTokens = await window.electron.getSlackTokens();
+          console.log('Stored Slack tokens verification:', {
+            accessToken: storedTokens.accessToken ? 'present' : 'missing',
+            teamId: storedTokens.teamId || 'missing',
+            userId: storedTokens.userId || 'missing'
+          });
+        } catch (err) {
+          console.error('Error storing Slack tokens in Electron:', err);
+        }
+      }
+      
+      // Update user's profile in Firebase
+      await updateSlackConnection(userId, tokenData);
+      
+      setStatus('success');
+      
+      // Redirect after a short delay
+      setTimeout(() => {
+        navigate('/connections');
+      }, 2000);
+    } catch (err) {
+      console.error('Error during Slack OAuth callback:', err);
+      setStatus('error');
+      setError(err.message || 'Failed to connect with Slack');
+    }
+  };
+  
   useEffect(() => {
-    async function handleOAuthCallback() {
+    // Handle OAuth callback from browser
+    async function handleBrowserCallback() {
       try {
-        // Get the code from URL
+        // Get the code and state from URL
         const params = new URLSearchParams(location.search);
         const code = params.get('code');
         const error = params.get('error');
+        const stateUserId = params.get('state'); // Get the user ID from state
         
         if (error) {
           setStatus('error');
@@ -24,46 +92,54 @@ function SlackCallback() {
           return;
         }
         
-        if (!code) {
-          setStatus('error');
-          setError('No authorization code received from Slack');
-          return;
+        if (code) {
+          console.log('Processing browser OAuth code:', code, 'with state:', stateUserId);
+          await processOAuthCode(code, stateUserId);
+          
+          // Update the connection status in parent components
+          if (window.dispatchEvent) {
+            window.dispatchEvent(new CustomEvent('slack-connection-updated', {
+              detail: { userId: stateUserId || (currentUser ? currentUser.uid : null) }
+            }));
+          }
         }
-        
-        if (!currentUser) {
-          setStatus('error');
-          setError('You must be logged in to connect Slack');
-          return;
-        }
-        
-        // Exchange code for token
-        const tokenData = await exchangeCodeForToken(code);
-        
-        // Store the token securely
-        if (window.electron) {
-          await window.electron.setSlackTokens({
-            accessToken: tokenData.access_token,
-            teamId: tokenData.team.id
-          });
-        }
-        
-        // Update user's profile in Firebase
-        await updateSlackConnection(currentUser.uid, tokenData);
-        
-        setStatus('success');
-        
-        // Redirect after a short delay
-        setTimeout(() => {
-          navigate('/connections');
-        }, 2000);
       } catch (err) {
-        console.error('Error during Slack OAuth callback:', err);
+        console.error('Error during browser OAuth callback:', err);
         setStatus('error');
         setError(err.message || 'Failed to connect with Slack');
       }
     }
     
-    handleOAuthCallback();
+    // Only call this in browser environment
+    if (!window.electron) {
+      handleBrowserCallback();
+    }
+    
+    // Register for Electron app protocol handler events
+    if (window.electron) {
+      console.log('Setting up Slack OAuth callback listener in Electron');
+      
+      window.electron.onSlackOAuthCallback(async (data) => {
+        console.log('Received Slack OAuth callback in Electron:', data);
+        if (data && data.code) {
+          await processOAuthCode(data.code, data.state);
+          
+          // Trigger a refresh event
+          if (window.dispatchEvent) {
+            window.dispatchEvent(new CustomEvent('slack-connection-updated', {
+              detail: { userId: data.state || (currentUser ? currentUser.uid : null) }
+            }));
+          }
+        }
+      });
+      
+      // Clean up on unmount
+      return () => {
+        if (window.electron) {
+          window.electron.removeSlackOAuthListener();
+        }
+      };
+    }
   }, [location, currentUser, navigate]);
   
   return (

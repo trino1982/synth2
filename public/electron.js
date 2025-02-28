@@ -4,10 +4,14 @@ const isDev = require('electron-is-dev');
 const Store = require('electron-store');
 
 const store = new Store();
+let mainWindow; // Keep reference to main window
+
+// Register custom protocol
+app.setAsDefaultProtocolClient('synth');
 
 // Create the main application window
 function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: {
@@ -15,10 +19,21 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
       enableRemoteModule: false,
+      webSecurity: !isDev // Disable webSecurity in development mode only
     },
     icon: path.join(__dirname, isDev ? '../public/logo192.png' : 'logo192.png'),
     show: false,
   });
+
+  // WebSocket proxy to fix WebSocket connection issues in development
+  if (isDev) {
+    mainWindow.webContents.session.webRequest.onBeforeSendHeaders(
+      { urls: ['ws://localhost:3000/*'] },
+      (details, callback) => {
+        callback({ requestHeaders: { ...details.requestHeaders, Origin: 'http://localhost:3000' } });
+      }
+    );
+  }
 
   // Load the app
   mainWindow.loadURL(
@@ -42,6 +57,25 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
   }
 }
+
+// Process protocol URLs on macOS
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  
+  if (url.startsWith('synth://slack/oauth/callback')) {
+    const urlObj = new URL(url);
+    const code = urlObj.searchParams.get('code');
+    const state = urlObj.searchParams.get('state');
+    
+    if (code && mainWindow) {
+      // Send the code and state to the renderer process
+      mainWindow.webContents.send('slack-oauth-callback', { 
+        code,
+        state
+      });
+    }
+  }
+});
 
 // Create window when Electron is ready
 app.whenReady().then(() => {
@@ -73,20 +107,52 @@ ipcMain.handle('clear-auth-token', async () => {
 });
 
 ipcMain.handle('get-slack-tokens', async () => {
-  return {
+  const tokens = {
     accessToken: store.get('slack-access-token'),
     teamId: store.get('slack-team-id'),
+    userId: store.get('slack-user-id')
   };
+  console.log('Retrieved Slack tokens from Electron store:', {
+    hasAccessToken: !!tokens.accessToken,
+    hasTeamId: !!tokens.teamId,
+    hasUserId: !!tokens.userId,
+    userId: tokens.userId
+  });
+  return tokens;
 });
 
-ipcMain.handle('set-slack-tokens', async (_, { accessToken, teamId }) => {
+ipcMain.handle('set-slack-tokens', async (_, { accessToken, teamId, userId }) => {
+  console.log('Setting Slack tokens in Electron store:', {
+    hasAccessToken: !!accessToken,
+    hasTeamId: !!teamId,
+    hasUserId: !!userId,
+    userId: userId
+  });
+  
   store.set('slack-access-token', accessToken);
   store.set('slack-team-id', teamId);
+  if (userId) {
+    store.set('slack-user-id', userId);
+  }
+  
+  // Verify the tokens were stored
+  const storedAccessToken = store.get('slack-access-token');
+  const storedTeamId = store.get('slack-team-id');
+  const storedUserId = store.get('slack-user-id');
+  
+  console.log('Verified Slack tokens in Electron store:', {
+    hasAccessToken: !!storedAccessToken,
+    hasTeamId: !!storedTeamId,
+    hasUserId: !!storedUserId,
+    userId: storedUserId
+  });
+  
   return true;
 });
 
 ipcMain.handle('clear-slack-tokens', async () => {
   store.delete('slack-access-token');
   store.delete('slack-team-id');
+  store.delete('slack-user-id');
   return true;
 });

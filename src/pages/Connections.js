@@ -6,36 +6,113 @@ import Header from '../components/Header';
 function Connections() {
   const { currentUser, userProfile, fetchUserProfile } = useAuth();
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [slackConnection, setSlackConnection] = useState({ connected: false });
   const [disconnecting, setDisconnecting] = useState(false);
   
-  useEffect(() => {
-    async function fetchConnectionStatus() {
-      if (currentUser) {
-        try {
-          setLoading(true);
-          // Fetch status from Firebase
-          const status = await getSlackConnectionStatus(currentUser.uid);
-          setSlackConnection(status);
-        } catch (error) {
-          console.error('Error fetching connection status:', error);
-        } finally {
-          setLoading(false);
+  const fetchConnectionStatus = async () => {
+    if (currentUser) {
+      try {
+        setLoading(true);
+        console.log('Fetching connection status for user:', currentUser.uid);
+        
+        // Fetch status from Firebase
+        const status = await getSlackConnectionStatus(currentUser.uid);
+        console.log('Slack connection status:', status);
+        setSlackConnection(status);
+        
+        // Also check for tokens in electron store if available
+        if (window.electron) {
+          try {
+            const tokens = await window.electron.getSlackTokens();
+            console.log('Electron Slack tokens:', {
+              hasAccessToken: !!tokens.accessToken,
+              hasTeamId: !!tokens.teamId,
+              userId: tokens.userId
+            });
+            
+            if (tokens && tokens.accessToken && !status.connected) {
+              console.log('Found tokens in Electron store but not in Firebase, refreshing profile...');
+              await fetchUserProfile(currentUser.uid);
+              const updatedStatus = await getSlackConnectionStatus(currentUser.uid);
+              console.log('Updated status after refresh:', updatedStatus);
+              setSlackConnection(updatedStatus);
+            }
+          } catch (err) {
+            console.error('Error checking Electron tokens:', err);
+          }
         }
+      } catch (error) {
+        console.error('Error fetching connection status:', error);
+      } finally {
+        setLoading(false);
       }
     }
-    
+  };
+  
+  useEffect(() => {
     fetchConnectionStatus();
+    
+    // Listen for connection updates from SlackCallback component
+    const handleConnectionUpdate = (event) => {
+      console.log('Received slack-connection-updated event', event.detail);
+      
+      // If a specific user ID was provided in the event, use it
+      if (event.detail && event.detail.userId) {
+        console.log(`Fetching connection status for specific user ID: ${event.detail.userId}`);
+        fetchUserProfile(event.detail.userId).then(() => {
+          fetchConnectionStatus();
+        });
+      } else {
+        fetchConnectionStatus();
+      }
+    };
+    
+    window.addEventListener('slack-connection-updated', handleConnectionUpdate);
+    
+    // Listen for Slack OAuth callback in Electron
+    if (window.electron) {
+      window.electron.onSlackOAuthCallback(async (data) => {
+        console.log('Received Slack OAuth callback in Connections component:', data);
+        if (data && data.code) {
+          // Wait a bit and then refresh
+          setTimeout(() => {
+            fetchConnectionStatus();
+          }, 2000);
+        }
+      });
+      
+      // Clean up
+      return () => {
+        window.removeEventListener('slack-connection-updated', handleConnectionUpdate);
+        if (window.electron) {
+          window.electron.removeSlackOAuthListener();
+        }
+      };
+    }
+    
+    return () => {
+      window.removeEventListener('slack-connection-updated', handleConnectionUpdate);
+    };
   }, [currentUser, userProfile]);
   
   const handleConnectSlack = () => {
-    window.open(getSlackAuthUrl(), '_blank');
+    if (!currentUser) {
+      console.error("Cannot connect to Slack: User not logged in");
+      return;
+    }
+    
+    console.log("Opening Slack authorization page with user ID:", currentUser.uid);
+    window.open(getSlackAuthUrl(currentUser.uid), '_blank');
   };
   
   const handleDisconnectSlack = async () => {
     try {
       setDisconnecting(true);
       await disconnectSlack(currentUser.uid);
+      if (window.electron) {
+        await window.electron.clearSlackTokens();
+      }
       await fetchUserProfile(currentUser.uid);
       setSlackConnection({ connected: false });
     } catch (error) {
@@ -45,12 +122,37 @@ function Connections() {
     }
   };
   
+  const handleRefresh = async () => {
+    try {
+      setRefreshing(true);
+      await fetchUserProfile(currentUser.uid);
+      await fetchConnectionStatus();
+    } catch (error) {
+      console.error('Error refreshing connections:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-gray-900 dark:to-gray-800">
       <Header />
       
       <main className="container mx-auto px-4 py-8">
-        <h1 className="text-3xl md:text-4xl text-indigo-900 dark:text-indigo-300 mb-8">Connections</h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl md:text-4xl text-indigo-900 dark:text-indigo-300">Connections</h1>
+          
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="flex items-center px-3 py-2 text-sm font-medium text-indigo-700 bg-indigo-100 dark:text-indigo-200 dark:bg-indigo-900/30 rounded-md hover:bg-indigo-200 dark:hover:bg-indigo-800/50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+          >
+            <svg className={`w-4 h-4 mr-1.5 ${refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg>
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
         
         <div className="max-w-3xl mx-auto">
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-md p-6 mb-6">
