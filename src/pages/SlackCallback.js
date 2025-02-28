@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { exchangeCodeForToken, updateSlackConnection } from '../services/slackService';
+import axios from 'axios'; // Import axios
+import { WebClient } from '@slack/web-api'; // Import Slack SDK
 
 function SlackCallback() {
   const [status, setStatus] = useState('processing');
@@ -31,9 +33,83 @@ function SlackCallback() {
       console.log('Processing OAuth code:', code, 'for user:', userId);
       
       // Exchange code for token
-      const tokenData = await exchangeCodeForToken(code, userId);
+      let tokenData;
+      try {
+        tokenData = await exchangeCodeForToken(code, userId);
+        console.log('Token exchange successful:', {
+          hasAccessToken: !!tokenData.access_token,
+          hasTeamId: !!tokenData.team?.id,
+          scope: tokenData.scope,
+          tokenType: tokenData.token_type
+        });
+      } catch (tokenErr) {
+        console.error('Error exchanging code for token:', tokenErr);
+        setStatus('error');
+        setError(`Failed to exchange code for token: ${tokenErr.message || 'Unknown error'}`);
+        return;
+      }
       
-      // Store the token securely
+      // Verify token data is complete
+      if (!tokenData.access_token) {
+        console.error('Missing access_token in response data', tokenData);
+        setStatus('error');
+        setError('Missing access token in response from Slack');
+        return;
+      }
+      
+      if (!tokenData.team?.id) {
+        console.error('Missing team.id in response data', tokenData);
+        setStatus('error');
+        setError('Missing team ID in response from Slack');
+        return;
+      }
+      
+      // Verify the token works by calling the auth.test API using Slack SDK
+      try {
+        const slackClient = new WebClient(tokenData.access_token);
+        const verifyResponse = await slackClient.auth.test();
+        
+        if (!verifyResponse.ok) {
+          console.error('Token verification failed using SDK:', verifyResponse.error);
+          setStatus('error');
+          setError(`Token verification failed: ${verifyResponse.error || 'Unknown error'}`);
+          return;
+        }
+        
+        console.log('Token verification successful using SDK:', verifyResponse);
+        
+        // Add user info to token data
+        tokenData.user_id = verifyResponse.user_id;
+        tokenData.user = verifyResponse.user;
+      } catch (verifyErr) {
+        console.error('Error verifying token with Slack SDK:', verifyErr);
+        // Fallback to axios method
+        try {
+          const axiosResponse = await axios.get('https://slack.com/api/auth.test', {
+            headers: {
+              Authorization: `Bearer ${tokenData.access_token}`
+            }
+          });
+          
+          if (!axiosResponse.data.ok) {
+            console.error('Token verification failed with axios:', axiosResponse.data);
+            setStatus('error');
+            setError(`Token verification failed: ${axiosResponse.data.error || 'Unknown error'}`);
+            return;
+          }
+          
+          console.log('Token verification successful with axios:', axiosResponse.data);
+          
+          // Add user info to token data
+          tokenData.user_id = axiosResponse.data.user_id;
+          tokenData.user = axiosResponse.data.user;
+        } catch (axiosErr) {
+          console.error('Error verifying token with axios:', axiosErr);
+          // Continue anyway to try storing the token
+        }
+      }
+      
+      // Store the token securely in Electron
       if (window.electron) {
         console.log('Storing Slack tokens in Electron', {
           accessToken: tokenData.access_token ? 'present' : 'missing',
@@ -42,10 +118,11 @@ function SlackCallback() {
         });
         
         try {
+          // Store the tokens in Electron
           await window.electron.setSlackTokens({
             accessToken: tokenData.access_token,
             teamId: tokenData.team.id,
-            userId: userId // Store the user ID with the tokens
+            userId: userId
           });
           
           // Verify the tokens were stored
@@ -57,11 +134,26 @@ function SlackCallback() {
           });
         } catch (err) {
           console.error('Error storing Slack tokens in Electron:', err);
+          // Continue anyway to try Firebase storage
         }
       }
       
       // Update user's profile in Firebase
-      await updateSlackConnection(userId, tokenData);
+      try {
+        await updateSlackConnection(userId, tokenData);
+        console.log('Successfully updated Slack connection in Firebase');
+      } catch (firebaseErr) {
+        console.error('Error updating Slack connection in Firebase:', firebaseErr);
+        setStatus('error');
+        setError(`Failed to update connection data: ${firebaseErr.message || 'Unknown error'}`);
+        return;
+      }
+      
+      // Dispatch event to notify other components
+      const connectionEvent = new CustomEvent('slack-connection-updated', {
+        detail: { userId, connected: true }
+      });
+      window.dispatchEvent(connectionEvent);
       
       setStatus('success');
       

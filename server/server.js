@@ -373,24 +373,45 @@ app.get('/slack/oauth/callback', async (req, res) => {
 // Endpoint to retrieve already exchanged tokens
 app.get('/api/slack/token/:code', (req, res) => {
   const { code } = req.params;
-  const userId = req.query.userId;
+  const { userId } = req.query;
   
-  // Try first with user ID
-  let tokenKey = userId ? `${code}:${userId}` : code;
-  let token = slackTokens[tokenKey];
+  // Add userId to the key if provided for more specific lookups
+  const tokenKey = userId ? `${code}:${userId}` : code;
+  const tokenData = slackTokens[tokenKey];
   
-  // If not found, try just the code (backward compatibility)
-  if (!token) {
-    token = slackTokens[code];
+  if (tokenData) {
+    console.log(`Retrieved stored token for code: ${code}, user ID: ${userId || 'unspecified'}`);
+    return res.json(tokenData);
   }
   
-  if (token) {
-    debugLog('Token found and returned for code:', code, 'user ID:', userId);
-    res.json(token);
-  } else {
-    debugLog('Token not found for code:', code, 'user ID:', userId);
-    res.status(404).json({ error: 'Token not found' });
+  // If we don't have the token data for this specific key, try to find it with just the code
+  // This is a fallback for when userId might not be consistently used between requests
+  if (userId && !tokenData) {
+    const fallbackData = slackTokens[code];
+    if (fallbackData) {
+      console.log(`Retrieved token with fallback key for code: ${code}`);
+      return res.json(fallbackData);
+    }
   }
+  
+  // If still no token found, try a more exhaustive search 
+  const allKeys = Object.keys(slackTokens);
+  const matchingKeys = allKeys.filter(key => key.startsWith(`${code}:`) || key === code);
+  
+  if (matchingKeys.length > 0) {
+    // Use the first matching key (most recent)
+    const firstMatchingKey = matchingKeys[0];
+    console.log(`Found token using partial key match: ${firstMatchingKey}`);
+    return res.json(slackTokens[firstMatchingKey]);
+  }
+  
+  // No token data found
+  console.log(`No token found for code: ${code}, user ID: ${userId || 'unspecified'}`);
+  return res.status(404).json({ 
+    error: 'Token not found', 
+    code: code,
+    userId: userId || null
+  });
 });
 
 // Slack OAuth endpoint

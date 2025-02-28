@@ -7,9 +7,9 @@
   "private": true,
   "author": "Chris Meeks",
   "scripts": {
-    "start": "concurrently \"npm run proxy\" \"react-scripts start\"",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
+    "start": "concurrently \"npm run proxy\" \"react-app-rewired start\"",
+    "build": "react-app-rewired build",
+    "test": "react-app-rewired test",
     "eject": "react-scripts eject",
     "proxy": "NODE_ENV=development nodemon server/server.js",
     "electron:dev": "concurrently \"npm start\" \"electron .\"",
@@ -19,7 +19,7 @@
   "dependencies": {
     "@headlessui/react": "^1.7.17",
     "@heroicons/react": "^2.0.18",
-    "@slack/web-api": "^6.9.0",
+    "@slack/web-api": "^6.13.0",
     "@tailwindcss/forms": "^0.5.7",
     "@testing-library/jest-dom": "^5.17.0",
     "@testing-library/react": "^13.4.0",
@@ -39,12 +39,23 @@
     "web-vitals": "^2.1.4"
   },
   "devDependencies": {
+    "assert": "^2.1.0",
     "autoprefixer": "^10.4.16",
+    "browserify-zlib": "^0.2.0",
+    "buffer": "^6.0.3",
     "concurrently": "^8.2.2",
+    "crypto-browserify": "^3.12.1",
     "electron": "^27.1.0",
     "electron-builder": "^24.6.4",
     "nodemon": "^3.0.1",
-    "postcss": "^8.4.31"
+    "os-browserify": "^0.3.0",
+    "path-browserify": "^1.0.1",
+    "postcss": "^8.4.31",
+    "process": "^0.11.10",
+    "querystring-es3": "^0.2.1",
+    "react-app-rewired": "^2.2.1",
+    "stream-browserify": "^3.0.0",
+    "util": "^0.12.5"
   },
   "build": {
     "appId": "com.chrismeeks.synth",

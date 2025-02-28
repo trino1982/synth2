@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { getSlackAuthUrl, getSlackConnectionStatus, disconnectSlack } from '../services/slackService';
+import { getSlackAuthUrl, getSlackConnectionStatus, disconnectSlack, updateSlackConnection } from '../services/slackService';
 import Header from '../components/Header';
+import axios from 'axios'; // Import axios
 
 function Connections() {
   const { currentUser, userProfile, fetchUserProfile } = useAuth();
@@ -123,12 +124,76 @@ function Connections() {
   };
   
   const handleRefresh = async () => {
+    setRefreshing(true);
     try {
-      setRefreshing(true);
+      console.log('Manually refreshing connection status...');
+      
+      if (!currentUser) {
+        console.error('Cannot refresh: No logged in user');
+        return;
+      }
+      
+      // First check if we have tokens in Electron
+      let electronTokens = null;
+      if (window.electron) {
+        try {
+          electronTokens = await window.electron.getSlackTokens();
+          console.log('Electron Slack tokens on refresh:', {
+            hasAccessToken: !!electronTokens?.accessToken,
+            hasTeamId: !!electronTokens?.teamId,
+            userId: electronTokens?.userId
+          });
+        } catch (err) {
+          console.error('Error getting Electron tokens:', err);
+        }
+      }
+      
+      // Then refresh the user profile from Firebase
       await fetchUserProfile(currentUser.uid);
+      
+      // Verify token with Slack API if we have one
+      if (electronTokens?.accessToken) {
+        console.log('Verifying token with Slack API...');
+        try {
+          const verifyResponse = await axios.get('https://slack.com/api/auth.test', {
+            headers: {
+              Authorization: `Bearer ${electronTokens.accessToken}`
+            }
+          });
+          
+          if (verifyResponse.data.ok) {
+            console.log('Token verification successful:', verifyResponse.data);
+            
+            // If token is valid, update Firebase with this data
+            await updateSlackConnection(currentUser.uid, {
+              access_token: electronTokens.accessToken,
+              team: { 
+                id: electronTokens.teamId, 
+                name: verifyResponse.data.team || 'Synth'
+              }
+            });
+            
+            console.log('Updated Firebase with verified token data');
+          } else {
+            console.error('Token verification failed:', verifyResponse.data.error);
+            // Token is invalid, clear it
+            if (window.electron) {
+              await window.electron.clearSlackTokens();
+              console.log('Cleared invalid tokens from Electron store');
+            }
+          }
+        } catch (error) {
+          console.error('Error verifying token with Slack API:', error);
+        }
+      }
+      
+      // Finally refresh the connection status display
       await fetchConnectionStatus();
+      
+      // Display toast or status message
+      console.log('Refresh completed');
     } catch (error) {
-      console.error('Error refreshing connections:', error);
+      console.error('Error during manual refresh:', error);
     } finally {
       setRefreshing(false);
     }

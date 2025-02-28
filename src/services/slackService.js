@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { doc, updateDoc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { WebClient } from '@slack/web-api'; // Import Slack SDK
 
 const PORT = process.env.PROXY_PORT || 3001;
 const PROXY_BASE_URL = `https://localhost:${PORT}`;
@@ -56,18 +57,88 @@ export async function exchangeCodeForToken(code, userId) {
 export async function updateSlackConnection(userId, slackData) {
   try {
     console.log(`[SlackService] Updating Slack connection for user: ${userId}`);
+    
+    // Ensure we have the minimum required data
+    if (!slackData.access_token) {
+      console.error('[SlackService] Missing access_token in slackData:', slackData);
+      throw new Error('Missing access_token in slackData');
+    }
+    
+    if (!slackData.team?.id) {
+      console.error('[SlackService] Missing team.id in slackData:', slackData);
+      throw new Error('Missing team.id in slackData');
+    }
+    
+    // Double-check token with Slack API if not already verified
+    if (!slackData.user_id) {
+      try {
+        const slackClient = new WebClient(slackData.access_token);
+        const verifyResponse = await slackClient.auth.test();
+        
+        if (verifyResponse.ok) {
+          console.log('[SlackService] Token verification successful:', verifyResponse);
+          
+          // Add user info to slackData
+          slackData.user_id = verifyResponse.user_id;
+          slackData.user = verifyResponse.user;
+        } else {
+          console.warn('[SlackService] Token verification warning:', verifyResponse.error);
+        }
+      } catch (verifyErr) {
+        console.error('[SlackService] Token verification warning (non-fatal):', verifyErr);
+        // Continue with the update
+      }
+    }
+    
     const userRef = doc(db, 'users', userId);
+    
+    // First check if the user document exists
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      console.log(`[SlackService] User document doesn't exist, creating it first`);
+      // Create the user document first
+      await updateDoc(userRef, {
+        createdAt: new Date().toISOString(),
+        uid: userId,
+        connections: {}
+      }).catch(error => {
+        // If the document doesn't exist, updateDoc will fail
+        console.log(`[SlackService] Error creating user document, will try set instead:`, error);
+      });
+    }
+    
+    // Now update with the Slack connection data
     await updateDoc(userRef, {
       'connections.slack': {
         connected: true,
         teamId: slackData.team.id,
-        teamName: slackData.team.name,
+        teamName: slackData.team.name || 'Synth',
         connectedAt: new Date().toISOString(),
         userId: userId,
+        slackUserId: slackData.user_id || 'unknown',
+        slackUsername: slackData.user || 'unknown',
+        accessToken: slackData.access_token, // Explicitly store access token
+        scope: slackData.scope || '',
         ...slackData
       }
     });
-    console.log(`[SlackService] Updated Slack connection in Firebase for team: ${slackData.team.name}, user: ${userId}`);
+    
+    console.log(`[SlackService] Updated Slack connection in Firebase for team: ${slackData.team.name || 'Synth'}, user: ${userId}`);
+    
+    // If we have Electron, update the tokens there too
+    if (window.electron) {
+      try {
+        await window.electron.setSlackTokens({
+          accessToken: slackData.access_token,
+          teamId: slackData.team.id,
+          userId: userId
+        });
+        console.log('[SlackService] Also updated Electron store with tokens');
+      } catch (err) {
+        console.error('[SlackService] Error updating Electron store:', err);
+      }
+    }
   } catch (error) {
     console.error('[SlackService] Error updating Slack connection:', error);
     throw error;
@@ -117,63 +188,126 @@ export async function getSlackConnectionStatus(userId) {
       const userData = userDoc.data();
       firebaseStatus = userData.connections?.slack || { connected: false };
       console.log(`[SlackService] Firebase status:`, 
-        firebaseStatus.connected ? 'Connected' : 'Not connected');
+        firebaseStatus.connected ? 'Connected' : 'Not connected',
+        firebaseStatus.connected ? `Team: ${firebaseStatus.teamName || 'Unknown'}` : '');
+    } else {
+      console.log('[SlackService] User document does not exist in Firebase');
     }
     
     // Get status from Electron store if available
     if (window.electron) {
       try {
         const tokens = await window.electron.getSlackTokens();
-        console.log(`[SlackService] Electron tokens:`, {
-          hasAccessToken: !!tokens.accessToken,
-          hasTeamId: !!tokens.teamId,
-          hasUserId: !!tokens.userId,
-          storedUserId: tokens.userId
-        });
-        
-        // Check if we have tokens in Electron store
-        if (tokens && tokens.accessToken && tokens.teamId) {
-          electronStatus = { 
-            connected: true,
-            teamId: tokens.teamId,
-            accessToken: tokens.accessToken,
-            userId: tokens.userId
-          };
+        if (tokens && tokens.accessToken) {
+          electronStatus.connected = true;
+          electronStatus.token = tokens.accessToken;
+          electronStatus.teamId = tokens.teamId;
+          
+          console.log(`[SlackService] Electron status: Connected to team ID ${tokens.teamId}`);
+          
+          // If we have token in Electron but not in Firebase, we should verify it's still valid
+          if (!firebaseStatus.connected) {
+            console.log('[SlackService] Found token in Electron but not in Firebase, verifying token validity...');
+            try {
+              // Try to validate the token with Slack SDK
+              const slackClient = new WebClient(tokens.accessToken);
+              const verifyResponse = await slackClient.auth.test();
+              
+              if (verifyResponse.ok) {
+                console.log('[SlackService] Token verification successful using SDK:', verifyResponse);
+                
+                // Token is valid, update Firebase with this token data
+                await updateSlackConnection(userId, {
+                  access_token: tokens.accessToken,
+                  team: {
+                    id: tokens.teamId,
+                    name: verifyResponse.team || 'Synth'
+                  },
+                  user_id: verifyResponse.user_id,
+                  user: verifyResponse.user
+                });
+                
+                // Update Firebase status to reflect the valid token
+                firebaseStatus = {
+                  connected: true,
+                  teamId: tokens.teamId,
+                  teamName: verifyResponse.team || 'Synth',
+                  userId: userId,
+                  slackUserId: verifyResponse.user_id,
+                  slackUsername: verifyResponse.user
+                };
+              } else {
+                console.error('[SlackService] Token verification failed:', verifyResponse.error);
+                // Token is invalid, clear it from Electron
+                await window.electron.clearSlackTokens();
+                electronStatus.connected = false;
+              }
+            } catch (verifyErr) {
+              console.error('[SlackService] Error verifying token with SDK:', verifyErr);
+              
+              // Try fallback to axios method
+              try {
+                const verifyResponse = await axios.get('https://slack.com/api/auth.test', {
+                  headers: {
+                    Authorization: `Bearer ${tokens.accessToken}`
+                  }
+                });
+                
+                if (verifyResponse.data.ok) {
+                  console.log('[SlackService] Token verification successful with axios:', verifyResponse.data);
+                  
+                  // Token is valid, update Firebase with this token data
+                  await updateSlackConnection(userId, {
+                    access_token: tokens.accessToken,
+                    team: {
+                      id: tokens.teamId,
+                      name: verifyResponse.data.team || 'Synth'
+                    },
+                    user_id: verifyResponse.data.user_id,
+                    user: verifyResponse.data.user
+                  });
+                  
+                  // Update Firebase status to reflect the valid token
+                  firebaseStatus = {
+                    connected: true,
+                    teamId: tokens.teamId,
+                    teamName: verifyResponse.data.team || 'Synth',
+                    userId: userId,
+                    slackUserId: verifyResponse.data.user_id,
+                    slackUsername: verifyResponse.data.user
+                  };
+                } else {
+                  console.error('[SlackService] Token verification failed with axios:', verifyResponse.data.error);
+                  // Token is invalid, clear it from Electron
+                  await window.electron.clearSlackTokens();
+                  electronStatus.connected = false;
+                }
+              } catch (axiosErr) {
+                console.error('[SlackService] Error verifying token with axios:', axiosErr);
+                // On error, keep the electron status as is but log the error
+              }
+            }
+          }
+        } else {
+          console.log('[SlackService] No valid tokens found in Electron store');
         }
       } catch (err) {
-        console.error('[SlackService] Error getting Electron tokens:', err);
+        console.error('[SlackService] Error checking Electron tokens:', err);
       }
     }
     
-    // If Firebase shows connected but Electron doesn't, update Electron
-    if (firebaseStatus.connected && !electronStatus.connected && window.electron && firebaseStatus.accessToken) {
-      console.log('[SlackService] Syncing Firebase tokens to Electron store');
-      await window.electron.setSlackTokens({
-        accessToken: firebaseStatus.accessToken,
-        teamId: firebaseStatus.teamId,
-        userId: userId
-      });
-    }
-    
-    // If Electron shows connected but Firebase doesn't, update Firebase
-    if (electronStatus.connected && !firebaseStatus.connected) {
-      console.log('[SlackService] Syncing Electron tokens to Firebase');
-      await updateSlackConnection(userId, { 
-        access_token: electronStatus.accessToken,
-        team: { id: electronStatus.teamId, name: 'Synth' }
-      });
-      // Refresh Firebase status
-      const refreshedDoc = await getDoc(userRef);
-      if (refreshedDoc.exists()) {
-        const refreshedData = refreshedDoc.data();
-        firebaseStatus = refreshedData.connections?.slack || { connected: false };
-      }
-    }
-    
-    // Return Firebase status (now updated if needed)
-    return firebaseStatus;
+    // Return the merged status, preferring Firebase status if connected
+    // or Electron status if Firebase is not connected
+    return {
+      connected: firebaseStatus.connected || electronStatus.connected,
+      teamId: firebaseStatus.teamId || electronStatus.teamId,
+      teamName: firebaseStatus.teamName || 'Synth',
+      slackUserId: firebaseStatus.slackUserId || 'unknown',
+      slackUsername: firebaseStatus.slackUsername || 'unknown',
+      source: firebaseStatus.connected ? 'firebase' : electronStatus.connected ? 'electron' : 'none'
+    };
   } catch (error) {
-    console.error('[SlackService] Error getting Slack connection status:', error);
+    console.error('[SlackService] Error getting connection status:', error);
     return { connected: false, error: error.message };
   }
 }
